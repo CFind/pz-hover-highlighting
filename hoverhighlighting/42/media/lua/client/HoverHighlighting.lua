@@ -91,18 +91,39 @@ local function resolveTarget(obj)
     return obj
 end
 
+---True when this square already has IsoWindow glass on the same N/W edge.
+---WindowN/W wall sprites (and IsoWindowFrame) copy the window's menu; highlight the glass.
+---See iso/IsoObject.java:7032, iso/objects/IsoWindowFrame.java:138, iso/IsoGridSquare.java:3778.
+---@param obj IsoObject
+---@return boolean
+local function hasWindowGlassOnSameEdge(obj)
+    local square = obj:getSquare()
+    if square == nil then
+        return false
+    end
+    if obj:hasProperty(IsoFlagType.WindowN) and square:getWindow(true) ~= nil then
+        return true
+    end
+    if obj:hasProperty(IsoFlagType.WindowW) and square:getWindow(false) ~= nil then
+        return true
+    end
+    if instanceof(obj, "IsoWindowFrame") then
+        ---@type IsoWindowFrame
+        local frame = obj
+        return frame:hasWindow()
+    end
+    return false
+end
+
 ---Door/window tiles can carry wall flags; treat them as interactables, not walls.
+---The wall around an IsoWindow is a separate pick with WindowN/W; leave it dark.
 ---@param obj IsoObject
 ---@return boolean
 local function isDoorOrWindow(obj)
     if instanceof(obj, "IsoDoor")
         or instanceof(obj, "IsoWindow")
-        or instanceof(obj, "IsoWindowFrame")
         or instanceof(obj, "IsoCurtain")
     then
-        return true
-    end
-    if obj:isWindow() then
         return true
     end
     if instanceof(obj, "IsoThumpable") then
@@ -110,17 +131,20 @@ local function isDoorOrWindow(obj)
         local thump = obj
         return thump:isDoor() or thump:isWindowN() or thump:isWindowW()
     end
-    return false
+    if hasWindowGlassOnSameEdge(obj) then
+        return false
+    end
+    return instanceof(obj, "IsoWindowFrame") or obj:isWindow()
 end
 
----Floors and cutaway walls are generic IsoObject sprites; they pick easily and glow badly.
+---Floors, stairs, and cutaway walls are generic sprites; they pick easily and glow badly.
 ---@param obj IsoObject
 ---@return boolean
-local function isStructuralFloorOrWall(obj)
+local function isStructuralTile(obj)
     if isDoorOrWindow(obj) then
         return false
     end
-    if obj:isFloor() or obj:isWall() then
+    if obj:isFloor() or obj:isWall() or obj:isStairsObject() then
         return true
     end
     return obj:hasProperty(IsoFlagType.WallNW)
@@ -128,23 +152,45 @@ local function isStructuralFloorOrWall(obj)
         or obj:hasProperty(IsoFlagType.cutW)
 end
 
----True when fetch() would classify this object as a world-menu source.
----Square-level options (walk-to, clean blood, sheet rope on a wall) are ignored
----so hovering a floor next to a fridge does not light the floor.
----See iso/ISWorldObjectContextMenuLogic.java:117.
+---True when this object has a player-facing loot container.
+---Doghouses are ItemContainers (tile property container=doghouse) with loot, but they
+---add no Open option. Skip that type rather than the Wood_DogHouse script name.
+---See iso/IsoObject.java:5441 and media/newtiledefinitions.tiles.txt (farm accessories).
 ---@param obj IsoObject
 ---@return boolean
-local function contributesWorldMenu(obj)
+local function hasPlayerLootContainer(obj)
+    local count = obj:getContainerCount()
+    if count <= 0 then
+        return false
+    end
+    for i = 0, count - 1 do
+        local container = obj:getContainerByIndex(i)
+        if container ~= nil and container:getType() ~= "doghouse" then
+            return true
+        end
+    end
+    return false
+end
+
+---True when this object itself is a world-menu source, not merely scrapable.
+---Square-level options (walk-to, clean blood) and disassemble-only tiles are ignored.
+---See iso/ISWorldObjectContextMenuLogic.java:117.
+---@param obj IsoObject
+---@param player IsoPlayer
+---@return boolean
+local function contributesWorldMenu(obj, player)
     if isDoorOrWindow(obj) then
         return true
     end
-    if instanceof(obj, "IsoWorldInventoryObject") or obj:getContainerCount() > 0 then
+    if instanceof(obj, "IsoWorldInventoryObject") or hasPlayerLootContainer(obj) then
         return true
     end
     if obj:hasFluid() or obj:hasComponent(ComponentType.FluidContainer) or obj:hasProperty(IsoFlagType.waterPiped) then
         return true
     end
-    if obj:hasComponent(ComponentType.ContextMenuConfig) or obj:hasComponent(ComponentType.UiConfig) then
+    -- UiConfig exists on most sprite-config tiles (pianos, doghouses). Only accept
+    -- entities that actually open a window — the option ISContextEntity would add.
+    if ISEntityUI.CanOpenWindowFor(player, obj) then
         return true
     end
     if obj:isHoppable() or obj:hasProperty(IsoFlagType.bed) then
@@ -179,15 +225,16 @@ local function contributesWorldMenu(obj)
 end
 
 ---@param obj IsoObject
+---@param player IsoPlayer
 ---@return boolean
-local function isEligible(obj)
+local function isEligible(obj, player)
     if instanceof(obj, "IsoGameCharacter") then
         return false
     end
-    if isStructuralFloorOrWall(obj) then
+    if isStructuralTile(obj) then
         return false
     end
-    return contributesWorldMenu(obj)
+    return contributesWorldMenu(obj, player)
 end
 
 ---@param obj IsoObject
@@ -209,8 +256,9 @@ local function applyHighlight(obj)
     ISInventoryPage.OnObjectHighlighted(MOUSE_PLAYER, obj, true)
 end
 
+---@param player IsoPlayer
 ---@return IsoObject|nil
-local function getHoverObject()
+local function getHoverObject(player)
     -- ClickObject is not exposed to Lua (docs/java-library/zombie/iso/__package.lua),
     -- so ContextPick(...).tile throws. UIManager.getLastPicked() is the IsoObject the
     -- engine already resolved from that pick (ui/UIManager.java:1543-1560).
@@ -223,7 +271,7 @@ local function getHoverObject()
     if square == nil or not square:isSeen(MOUSE_PLAYER) then
         return nil
     end
-    if not isEligible(obj) then
+    if not isEligible(obj, player) then
         return nil
     end
     return obj
@@ -235,7 +283,7 @@ local function onRenderTick()
         clearHighlight()
         return
     end
-    local obj = getHoverObject()
+    local obj = getHoverObject(player)
     if obj == highlightedObject then
         return
     end
