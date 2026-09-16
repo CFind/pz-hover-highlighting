@@ -10,9 +10,11 @@
     "mods": {
         "hoverhighlighting": {
             "name": "HoverHighlighting",
-            "description": "Highlights items and containers you hover the mouse over, using the game's own container highlighting.",
+            "description": "Client-side mod that highlights interactables (doors, windows, sinks, and so on) when the mouse hovers over them.",
+            "author": "Connor",
+            "modversion": "1.0",
             "build": {
-                "modInfo": "auto"
+                "modInfo": "auto"d
             }
         }
     },
