@@ -1,0 +1,20 @@
+{
+    "$schema": "https://raw.githubusercontent.com/escapepz/project-zomboid-studio/refs/heads/42.17.0/pzstudio.schema.json",
+    "workshop": {
+        "title": "HoverHighlighting",
+        "visibility": "unlisted",
+        "tags": [
+            "Build 42"
+        ]
+    },
+    "mods": {
+        "hoverhighlighting": {
+            "name": "HoverHighlighting",
+            "description": "Highlights items and containers you hover the mouse over, using the game's own container highlighting.",
+            "build": {
+                "modInfo": "auto"
+            }
+        }
+    },
+    "excludes": []
+}
