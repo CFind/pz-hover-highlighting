@@ -39,10 +39,8 @@ end
 ---@param player IsoPlayer
 ---@return boolean
 local function playerCanHover(player)
-    if player:isDead() or player:isAiming() or player:isAsleep() then
-        return false
-    end
-    if player:getVehicle() ~= nil then
+    if player:isDead() or player:isAiming() or player:isAsleep()
+        or player:getVehicle() ~= nil then
         return false
     end
     local speedControls = UIManager.getSpeedControls()
@@ -115,7 +113,7 @@ local function hasWindowGlassOnSameEdge(obj)
     return false
 end
 
----Door/window tiles can carry wall flags; treat them as interactables, not walls.
+---Door/window tiles can carry wall flags; treat them as interactables
 ---The wall around an IsoWindow is a separate pick with WindowN/W; leave it dark.
 ---@param obj IsoObject
 ---@return boolean
@@ -137,7 +135,8 @@ local function isDoorOrWindow(obj)
     return instanceof(obj, "IsoWindowFrame") or obj:isWindow()
 end
 
----Floors, stairs, and cutaway walls are generic sprites; they pick easily and glow badly.
+---Floors, stairs, and cutaway walls are generic sprites;
+---They 
 ---@param obj IsoObject
 ---@return boolean
 local function isStructuralTile(obj)
@@ -154,7 +153,7 @@ end
 
 ---True when this object has a player-facing loot container.
 ---Doghouses are ItemContainers (tile property container=doghouse) with loot, but they
----add no Open option. Skip that type rather than the Wood_DogHouse script name.
+---add no Open option.
 ---See iso/IsoObject.java:5441 and media/newtiledefinitions.tiles.txt (farm accessories).
 ---@param obj IsoObject
 ---@return boolean
@@ -172,7 +171,7 @@ local function hasPlayerLootContainer(obj)
     return false
 end
 
----True when this object itself is a world-menu source, not merely scrapable.
+---True when this object itself is a world-menu source, not scrapable.
 ---Square-level options (walk-to, clean blood) and disassemble-only tiles are ignored.
 ---See iso/ISWorldObjectContextMenuLogic.java:117.
 ---@param obj IsoObject
