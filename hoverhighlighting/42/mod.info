@@ -1,0 +1,7 @@
+id=hoverhighlighting
+name=HoverHighlighting
+description=Client-side mod that highlights interactables (doors, windows, sinks, and so on) when the mouse hovers over them.
+author=Connor
+modversion=1.0
+poster=poster.png
+icon=icon.png

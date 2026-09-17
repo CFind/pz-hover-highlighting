@@ -4,7 +4,9 @@
         "title": "HoverHighlighting",
         "visibility": "unlisted",
         "tags": [
-            "Build 42"
+            "Build 42",
+            "Interface",
+            "QoL"
         ]
     },
     "mods": {

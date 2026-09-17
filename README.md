@@ -10,7 +10,8 @@ item highlight function.
 
 
 I made this mostly to learn how to mod Project Zomboid, but also because I would
-occasionally have issues trying to open the context menu with the mouse, especially on sinks and windows.
+occasionally have issues trying to open the context menu with the mouse, especially 
+on sinks and windows.
 
 Currently uses the color defined for the game's container open highlight.
 Which you can set in the game options. This works for me, but if there is enough
