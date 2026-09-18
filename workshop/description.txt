@@ -1,3 +1,31 @@
 [h1]Hover Highlighting[/h1]
 
-Client-side mod that highlights interactables (doors, windows, sinks, and so on) when the mouse hovers over them.
+This is a small, client-side only mod for Project Zomboid. It highlights interactables when hovering the mouse over them using the game's 'container open' item highlight function.
+
+[img]https://raw.githubusercontent.com/CFind/pz-hover-highlighting/main/images/PZ_HoverHighlight4.png[/img]
+
+I made this mostly to learn how to mod Project Zomboid, but also because I would occasionally have issues trying to open the context menu with the mouse, especially on sinks and windows.
+
+Currently uses the color defined for the game's container open highlight. Which you can set in the game options. This works for me, but if there is enough demand I can make it configurable.
+
+[h2]Usage[/h2]
+
+Just subscribe, or put this into the 'Zomboid/mods' folder.
+
+Linux:
+[code]/home/<YourUsername>/Zomboid/mods[/code]
+
+Windows:
+[code]C:\Users\<YourUsername>\Zomboid\mods[/code]
+
+[h2]Compatibility[/h2]
+
+This [i]should[/i] not cause any problems (I think), it might have issues highlighting mod interactables.
+
+Leave a comment or maybe [url=https://github.com/CFind/pz-hover-highlighting/issues]open an issue on Github[/url] if there are mod items that this mod misses. No promises, but if I have enough time I will attempt to make this work with other mods.
+
+[h2]Under the hood[/h2]
+
+This works by roughly determining whether an object adds an option to the context menu. Several other checks are necessary, for example, the walls that contain a window add window context options, so I check if the object has a window in it instead. This might lead to some strange behavior with player built objects, so let me know if you are or aren't seeing something highlighted that should or shouldn't.
+
+I did use AI when writing the code and learning Project Zomboid internals. But images, this readme, and anything I write intended directly for human consumption is written by me.
