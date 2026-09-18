@@ -17,11 +17,23 @@
 -- Mouse input is always player 0 in vanilla click handling.
 local MOUSE_PLAYER = 0
 
+-- Height of one storey's wall in tiles of iso ground distance. A storey is
+-- 96 * tileScale screen px (iso/IsoUtils.java:105) and a tile of iso x or y moves
+-- the screen 32 * tileScale px (iso/IsoUtils.java:75), so a wall spans 3 tiles.
+-- FBO picking ignores cutaway IsoWindows (iso/fboRenderChunk/FBORenderObjectPicker.java:140-163),
+-- so south-facing glass is found on the wall plane instead of by ContextPick / PickWindow.
+local WALL_HEIGHT_TILES = 3
+
 -- The world menu's Grab options come from every ground item within this many screen
--- pixels of the cursor (divided by zoom), across squares within one tile of the
--- cursor's iso position. See iso/ISWorldObjectContextMenuLogic.java:3326-3361, 3414-3426.
+-- pixels of the cursor (divided by zoom). See iso/ISWorldObjectContextMenuLogic.java:3343-3361, 3414-3426.
 local GRAB_RADIUS_PX = 48
-local GRAB_RADIUS_TILES = 1
+
+-- With the cursor still, an object that drops out of the wanted set is held this
+-- long before it is cleared. Engine-side churn (a door's Hit_Door render effect,
+-- chunk re-renders) can remove an object from the pick list for a few frames; the
+-- hold hides that. Any real cursor movement clears immediately.
+local HOLD_MS = 100
+local HOLD_MOVE_PX = 2
 
 -- Java objects are stable table keys; vanilla keys ObjectsHighlightedElsewhere the same
 -- way (client/ISUI/ISInventoryPage.lua:434).
@@ -30,6 +42,11 @@ local highlighted = {}
 ---Scratch set rebuilt every frame; emptied at the end of onRenderTick.
 ---@type table<IsoObject, boolean>
 local wanted = {}
+---getTimestampMs() of the last frame each highlighted object was wanted.
+---@type table<IsoObject, number>
+local lastWanted = {}
+---Cursor position the hold is measured from; re-anchored on real movement.
+local holdAnchorX, holdAnchorY = -1, -1
 
 ---@param obj IsoObject
 local function clearHighlight(obj)
@@ -46,6 +63,7 @@ local function clearAllHighlights()
     for obj in pairs(highlighted) do
         clearHighlight(obj)
         highlighted[obj] = nil
+        lastWanted[obj] = nil
     end
 end
 
@@ -301,7 +319,7 @@ local function spritePickScale(tex)
     return 1, 1
 end
 
----True when the cursor hits this object's sprite mask (or a window's glass gap).
+---True when the cursor hits this object's sprite mask.
 ---ContextPick already finds every mask hit, then returns only the highest-scored
 ---one (iso/IsoObjectPicker.java:184-203, iso/fboRenderChunk/FBORenderObjectPicker.java:80-125).
 ---ClickObject is not exposed, so the rest of that list is rebuilt here.
@@ -351,110 +369,234 @@ local function spriteContainsMouse(obj)
     end
     lx = math.floor(lx)
     ly = math.floor(ly)
-    if obj:isMaskClicked(lx, ly, flip) then
-        return true
-    end
-    -- Window / frame glass is empty mask; PickWindow still accepts the click when
-    -- opaque pixels sit both above and below (iso/IsoObjectPicker.java:374-394, 424-442).
-    if not instanceof(obj, "IsoWindow") and not instanceof(obj, "IsoWindowFrame") then
-        return false
-    end
-    local above = false
-    local ty = ly
-    while ty >= 0 do
-        if obj:isMaskClicked(lx, ty) then
-            above = true
-            break
-        end
-        ty = ty - 1
-    end
-    if not above then
-        return false
-    end
-    ty = ly
-    local maskHeight = tex:getHeightOrig()
-    while ty < maskHeight do
-        if obj:isMaskClicked(lx, ty) then
-            return true
-        end
-        ty = ty + 1
-    end
-    return false
+    return obj:isMaskClicked(lx, ly, flip)
 end
 
----Eligible tiles whose sprites actually contain the cursor, including ones
----ContextPick discarded as not the top hit. Search the pick square and the iso
----cell under the cursor, plus a few tiles toward the camera — tall sprites cover
----pixels that iso-convert several squares in front (iso/fboRenderChunk/FBORenderObjectPicker.java:40-42, 267-275).
+---Light an opening (glass, empty frame, built window) and the curtain that hangs
+---on it. Curtains are only ever reached through their opening: a curtainS has
+---`north == true` (iso/CellLoader.java:340) and hangs one square north of its
+---window, so scanning a square for "north curtains" also catches the curtain of
+---the window on the *next* row — the wrong room. HasCurtains resolves the pair
+---correctly (iso/objects/IsoWindow.java:152-162).
+---@param obj IsoObject|nil
 ---@param player IsoPlayer
----@param pickSquare IsoGridSquare
 ---@param out table<IsoObject, boolean>
-local function collectOverlappingObjects(player, pickSquare, out)
+local function addOpening(obj, player, out)
+    if obj == nil then
+        return
+    end
+    obj = resolveTarget(obj)
+    if out[obj] then
+        return
+    end
+    local square = obj:getSquare()
+    if square == nil then
+        return
+    end
+    if isEligible(obj, player) then
+        out[obj] = true
+        if instanceof(obj, "IsoWindow")
+            or instanceof(obj, "IsoWindowFrame")
+            or instanceof(obj, "IsoThumpable")
+        then
+            ---@type IsoWindow|IsoWindowFrame|IsoThumpable
+            local opening = obj
+            addOpening(opening:HasCurtains(), player, out)
+        end
+    end
+end
+
+---Add every opening on this square's north (or west) edge.
+---@param square IsoGridSquare
+---@param north boolean
+---@param player IsoPlayer
+---@param out table<IsoObject, boolean>
+---@return boolean hasOpening true if the edge holds any opening, eligible or not
+local function addOpeningsOnEdge(square, north, player, out)
+    local found = false
+    local window = square:getWindow(north)
+    if window ~= nil then
+        addOpening(window, player, out)
+        found = true
+    end
+    local frame = square:getWindowFrame(north)
+    if frame ~= nil then
+        addOpening(frame, player, out)
+        found = true
+    end
+    local objects = square:getObjects()
+    for n = 0, objects:size() - 1 do
+        local obj = objects:get(n)
+        if instanceof(obj, "IsoThumpable") then
+            ---@type IsoThumpable
+            local thump = obj
+            if (north and thump:isWindowN()) or (not north and thump:isWindowW()) then
+                addOpening(thump, player, out)
+                found = true
+            end
+        end
+    end
+    return found
+end
+
+---Openings on the N (or W) wall plane under the cursor.
+---
+---The FBO picker strips cutaway IsoWindows from its click list
+---(iso/fboRenderChunk/FBORenderObjectPicker.java:140-163), so south-facing glass
+---never reaches getLastPicked or PickWindow and has to be found geometrically.
+---screenToIso assumes the cursor is on the ground; a point `h` px up a north wall
+---at y = sy instead converts to (x - h/32t, sy - h/32t) (iso/IsoUtils.java:73-105,
+---t = tileScale). So `d = sy - wy` is the height in tiles and `wx + d` the position
+---along the wall. A storey is 96t px = 3 tiles, hence WALL_HEIGHT_TILES.
+---
+---Several squares along the toward-camera diagonal satisfy this for different
+---heights; the nearest wall drawn on top wins, so walk from nearest and stop at
+---the first edge holding an opening or a plain wall.
+---@param cell IsoCell
+---@param z integer
+---@param wx number
+---@param wy number
+---@param north boolean
+---@param player IsoPlayer
+---@param out table<IsoObject, boolean>
+local function collectOpeningsOnWallPlane(cell, z, wx, wy, north, player, out)
+    -- `edge` is the plane coordinate (y for a north wall, x for a west wall);
+    -- `along` runs the length of the wall.
+    local e = north and wy or wx
+    local a = north and wx or wy
+    for edge = math.floor(e + WALL_HEIGHT_TILES), math.ceil(e), -1 do
+        local d = edge - e
+        if d < WALL_HEIGHT_TILES then
+            local along = math.floor(a + d)
+            local square
+            if north then
+                square = cell:getGridSquare(along, edge, z)
+            else
+                square = cell:getGridSquare(edge, along, z)
+            end
+            if square ~= nil then
+                if addOpeningsOnEdge(square, north, player, out) then
+                    return
+                end
+                if square:getWall(north) ~= nil then
+                    return
+                end
+            end
+        end
+    end
+end
+
+---Eligible furniture on this square whose sprite mask contains the cursor.
+---ContextPick finds every such hit and keeps only the top-scored one
+---(iso/IsoObjectPicker.java:184-203); this recovers the rest. Windows, frames,
+---and curtains are handled by collectOpeningsOnWallPlane, ground items by
+---collectItemsOnSquare, so both are skipped here.
+---@param square IsoGridSquare
+---@param player IsoPlayer
+---@param out table<IsoObject, boolean>
+local function collectFurnitureOnSquare(square, player, out)
+    local objects = square:getObjects()
+    for n = 0, objects:size() - 1 do
+        local obj = resolveTarget(objects:get(n))
+        if not out[obj]
+            and not instanceof(obj, "IsoWorldInventoryObject")
+            and not instanceof(obj, "IsoWindow")
+            and not instanceof(obj, "IsoCurtain")
+            and not instanceof(obj, "IsoWindowFrame")
+            and isEligible(obj, player)
+            and spriteContainsMouse(obj)
+        then
+            out[obj] = true
+        end
+    end
+end
+
+---Ground items on this square within the world menu's grab radius of the cursor.
+---This is the one part of the menu that is radius-based; vanilla applies it only
+---to IsoWorldInventoryObject (iso/ISWorldObjectContextMenuLogic.java:3343-3361),
+---and getScreenPosX/Y exists only on that class (iso/objects/IsoWorldInventoryObject.java:663).
+---@param square IsoGridSquare
+---@param mx integer
+---@param my integer
+---@param radiusSq number
+---@param out table<IsoObject, boolean>
+local function collectItemsOnSquare(square, mx, my, radiusSq, out)
+    local items = square:getWorldObjects()
+    for i = 0, items:size() - 1 do
+        local item = items:get(i)
+        local dx = item:getScreenPosX(MOUSE_PLAYER) - mx
+        local dy = item:getScreenPosY(MOUSE_PLAYER) - my
+        if dx * dx + dy * dy <= radiusSq then
+            out[item] = true
+        end
+    end
+end
+
+---One walk over the squares around the cursor, applying each kind's own test.
+---The world menu has no single search to mirror: it expands to whole squares
+---for objects (iso/ISWorldObjectContextMenuLogic.java:576-643) and uses a screen
+---radius only for ground items. Square expansion is deliberately not used here —
+---a piano next to a fridge would light — so the tests stay per kind, but the iso
+---conversion and square lookup happen once.
+---
+---Box: one tile behind the cursor and pick, three toward the camera. Tall sprites
+---cover pixels that iso-convert several squares in front
+---(iso/fboRenderChunk/FBORenderObjectPicker.java:40-42, 267-275); the item
+---radius needs less and is simply filtered by its own test.
+---
+---Furniture and items require a seen square, the same gate the right-click
+---handler puts on the menu (server/ISObjectClickHandler.lua:33). Openings are
+---exempt there too: a south window's square is outside the room.
+---@param player IsoPlayer
+---@param z integer
+---@param pickSquare IsoGridSquare|nil
+---@param out table<IsoObject, boolean>
+local function collectAroundCursor(player, z, pickSquare, out)
+    -- getMouseX/Y are Mouse.getXA/YA, the same space UIManager passes to the menu
+    -- (ui/UIManager.java:533-534) and that getScreenPosX/Y returns.
     local mx = getMouseX()
     local my = getMouseY()
-    local z = pickSquare:getZ()
-    local wx = math.floor(screenToIsoX(MOUSE_PLAYER, mx, my, z))
-    local wy = math.floor(screenToIsoY(MOUSE_PLAYER, mx, my, z))
-    local px = pickSquare:getX()
-    local py = pickSquare:getY()
-    local minX = math.min(wx, px) - 1
-    local maxX = math.max(wx, px) + 3
-    local minY = math.min(wy, py) - 1
-    local maxY = math.max(wy, py) + 3
+    local wx = screenToIsoX(MOUSE_PLAYER, mx, my, z)
+    local wy = screenToIsoY(MOUSE_PLAYER, mx, my, z)
     local cell = getCell()
+    collectOpeningsOnWallPlane(cell, z, wx, wy, true, player, out)
+    collectOpeningsOnWallPlane(cell, z, wx, wy, false, player, out)
+    local ix = math.floor(wx)
+    local iy = math.floor(wy)
+    local px, py = ix, iy
+    if pickSquare ~= nil then
+        px = pickSquare:getX()
+        py = pickSquare:getY()
+    end
+    local minX = math.min(ix, px) - 1
+    local maxX = math.max(ix, px) + 3
+    local minY = math.min(iy, py) - 1
+    local maxY = math.max(iy, py) + 3
+    local radius = GRAB_RADIUS_PX / getCore():getZoom(MOUSE_PLAYER)
+    local radiusSq = radius * radius
     for y = minY, maxY do
         for x = minX, maxX do
             local square = cell:getGridSquare(x, y, z)
             if square ~= nil and square:isSeen(MOUSE_PLAYER) then
-                local objects = square:getObjects()
-                for n = 0, objects:size() - 1 do
-                    local obj = resolveTarget(objects:get(n))
-                    if not out[obj]
-                        and not instanceof(obj, "IsoWorldInventoryObject")
-                        and isEligible(obj, player)
-                        and spriteContainsMouse(obj)
-                    then
-                        out[obj] = true
-                    end
-                end
+                collectFurnitureOnSquare(square, player, out)
+                collectItemsOnSquare(square, mx, my, radiusSq, out)
             end
         end
     end
 end
 
----Ground items the world menu would offer to grab: the same radius search
----ISWorldObjectContextMenuLogic.handleInteraction runs on right-click, so a stack of
----items lights as one. Only the pick's Z is used; the cursor decides the squares.
----@param pickSquare IsoGridSquare
----@param out table<IsoObject, boolean>
-local function collectNearbyWorldItems(pickSquare, out)
-    -- getMouseX/Y are Mouse.getXA/YA, the same space UIManager passes to the menu
-    -- (ui/UIManager.java:533-534) and that getScreenPosX/Y returns
-    -- (iso/objects/IsoWorldInventoryObject.java:663-674).
-    local mx = getMouseX()
-    local my = getMouseY()
-    local z = pickSquare:getZ()
-    local wx = screenToIsoX(MOUSE_PLAYER, mx, my, z)
-    local wy = screenToIsoY(MOUSE_PLAYER, mx, my, z)
-    local radius = GRAB_RADIUS_PX / getCore():getZoom(MOUSE_PLAYER)
-    local radiusSq = radius * radius
-    local cell = getCell()
-    for y = math.floor(wy - GRAB_RADIUS_TILES), math.ceil(wy + GRAB_RADIUS_TILES) do
-        for x = math.floor(wx - GRAB_RADIUS_TILES), math.ceil(wx + GRAB_RADIUS_TILES) do
-            local square = cell:getGridSquare(x, y, z)
-            if square ~= nil and square:isSeen(MOUSE_PLAYER) then
-                local items = square:getWorldObjects()
-                for i = 0, items:size() - 1 do
-                    local item = items:get(i)
-                    local dx = item:getScreenPosX(MOUSE_PLAYER) - mx
-                    local dy = item:getScreenPosY(MOUSE_PLAYER) - my
-                    if dx * dx + dy * dy <= radiusSq then
-                        out[item] = true
-                    end
-                end
-            end
-        end
-    end
+---The right-click handler's visibility gate: the picked square must be seen
+---unless the pick is a window, door, thumpable, or tree
+---(server/ISObjectClickHandler.lua:33).
+---@param obj IsoObject
+---@param square IsoGridSquare
+---@return boolean
+local function pickIsVisible(obj, square)
+    return square:isSeen(MOUSE_PLAYER)
+        or instanceof(obj, "IsoWindow")
+        or instanceof(obj, "IsoDoor")
+        or instanceof(obj, "IsoThumpable")
+        or instanceof(obj, "IsoTree")
 end
 
 ---Fill `out` with every object the hover should light this frame.
@@ -464,47 +606,30 @@ local function collectHoverObjects(player, out)
     -- ClickObject is not exposed to Lua (docs/java-library/zombie/iso/__package.lua),
     -- so ContextPick(...).tile throws. UIManager.getLastPicked() is the IsoObject the
     -- engine already resolved from that pick (ui/UIManager.java:1543-1560).
+    --
+    -- The pick is a hint, not a gate. UIManager nulls it whenever ContextPick has
+    -- no hit (ui/UIManager.java:1542-1560), and an object drops out of the pick
+    -- list while its render info is in flux — e.g. a door with a Hit_Door effect
+    -- is pulled out of the chunk texture for 15-30 ticks per thump
+    -- (iso/objects/IsoDoor.java:1200, iso/fboRenderChunk/FBORenderCell.java:1797).
+    -- Bailing on a nil pick made every highlight blink at the thump rhythm.
     local picked = UIManager.getLastPicked()
-    if picked == nil then
-        return
-    end
-    local obj = resolveTarget(picked)
-    local square = obj:getSquare()
-    if square == nil or not square:isSeen(MOUSE_PLAYER) then
-        return
-    end
-    if isEligible(obj, player) then
-        out[obj] = true
-    end
-    -- The wall's mask is the frame; clicks in the opening pick whatever is behind.
-    -- PickWindow uses that gap test (iso/IsoObjectPicker.java:352-399) so the pane
-    -- still lights. Skip it when resolveTarget already turned the wall into glass.
-    if not instanceof(obj, "IsoWindow") and not instanceof(obj, "IsoCurtain") then
-        local mx = getMouseX()
-        local my = getMouseY()
-        local window = IsoObjectPicker.Instance:PickWindow(mx, my)
-        if window ~= nil then
-            window = resolveTarget(window)
-            local windowSquare = window:getSquare()
-            if windowSquare ~= nil and windowSquare:isSeen(MOUSE_PLAYER) and isEligible(window, player) then
-                out[window] = true
-            end
-        end
-        local frame = IsoObjectPicker.Instance:PickWindowFrame(mx, my)
-        if frame ~= nil then
-            frame = resolveTarget(frame)
-            local frameSquare = frame:getSquare()
-            if frameSquare ~= nil and frameSquare:isSeen(MOUSE_PLAYER) and isEligible(frame, player) then
-                out[frame] = true
+    local z = math.floor(player:getZ())
+    ---@type IsoGridSquare|nil
+    local pickSquare = nil
+    if picked ~= nil then
+        local obj = resolveTarget(picked)
+        pickSquare = obj:getSquare()
+        if pickSquare ~= nil then
+            z = pickSquare:getZ()
+            if pickIsVisible(obj, pickSquare) and isEligible(obj, player) then
+                out[obj] = true
             end
         end
     end
-    -- ContextPick keeps only the top hit; collect every eligible sprite the cursor
-    -- is actually over so a window in front of a bookcase can both light.
-    collectOverlappingObjects(player, square, out)
-    -- The menu runs the item search for any picked object with a seen square
-    -- (server/ISObjectClickHandler.lua:33), so it runs even when the pick is a floor.
-    collectNearbyWorldItems(square, out)
+    -- The menu runs its search for any picked object with a square
+    -- (server/ISObjectClickHandler.lua:33), so this runs even when the pick is a floor.
+    collectAroundCursor(player, z, pickSquare, out)
 end
 
 local function onRenderTick()
@@ -513,18 +638,34 @@ local function onRenderTick()
         clearAllHighlights()
         return
     end
+    local now = getTimestampMs()
+    local mx = getMouseX()
+    local my = getMouseY()
+    local moved = math.abs(mx - holdAnchorX) > HOLD_MOVE_PX
+        or math.abs(my - holdAnchorY) > HOLD_MOVE_PX
+    if moved then
+        holdAnchorX = mx
+        holdAnchorY = my
+    end
     collectHoverObjects(player, wanted)
     -- Lua 5.1 allows clearing the current key during pairs(); adding keys does not.
     for obj in pairs(highlighted) do
-        if not wanted[obj] then
+        if wanted[obj] then
+            lastWanted[obj] = now
+        elseif moved
+            or obj:getSquare() == nil
+            or now - (lastWanted[obj] or 0) > HOLD_MS
+        then
             clearHighlight(obj)
             highlighted[obj] = nil
+            lastWanted[obj] = nil
         end
     end
     for obj in pairs(wanted) do
         if not highlighted[obj] then
             applyHighlight(obj)
             highlighted[obj] = true
+            lastWanted[obj] = now
         end
         wanted[obj] = nil
     end
