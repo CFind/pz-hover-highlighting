@@ -1,4 +1,5 @@
 {
+    "license": "GPL-3.0-or-later",
     "scripts": {
         "clean": "pzstudio clean",
         "build": "pzstudio clean && pzstudio build",
@@ -6,6 +7,6 @@
         "update": "pzstudio update"
     },
     "devDependencies": {
-        "pzstudio": "^2.2.0"
+        "pzstudio": "^1.1.0"
     }
 }

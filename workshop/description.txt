@@ -26,6 +26,6 @@ Leave a comment or maybe [url=https://github.com/CFind/pz-hover-highlighting/iss
 
 [h2]Under the hood[/h2]
 
-This works by roughly determining whether an object adds an option to the context menu. Several other checks are necessary, for example, the walls that contain a window add window context options, so I check if the object has a window in it instead. This might lead to some strange behavior with player built objects, so let me know if you are or aren't seeing something highlighted that should or shouldn't.
+This works by roughly determining whether an object adds an option to the context menu. Several other checks are necessary, for example, the walls that contain a window add window context options, so I check if the object has a window in it instead. This might lead to some strange behavior with player built objects, so let me know if you are or aren't seeing something highlighted that should or shouldn't be.
 
 I did use AI when writing the code and learning Project Zomboid internals. But images, this readme, and anything I write intended directly for human consumption is written by me.

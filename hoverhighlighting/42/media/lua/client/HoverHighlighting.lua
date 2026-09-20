@@ -2,6 +2,7 @@
     HoverHighlighting
     This is a mod for Project Zomboid. It highlights items you hover
     the mouse over. Client side only.
+    Copyright (C) 2026 Connor
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -12,10 +13,18 @@
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
     GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <https://www.gnu.org/licenses/>.
 ]]
 
 -- Mouse input is always player 0 in vanilla click handling.
 local MOUSE_PLAYER = 0
+
+-- Custom sandbox options support integers but not a color-picker type
+-- (sandbox/CustomSandboxOptions.java:103-123). Values are stored as 0-255 RGB.
+local DEFAULT_HIGHLIGHT_CHANNEL = 175
+local COLOR_CHANNEL_SCALE = 1 / 255
 
 -- Height of one storey's wall in tiles of iso ground distance. A storey is
 -- 96 * tileScale screen px (iso/IsoUtils.java:105) and a tile of iso x or y moves
@@ -53,10 +62,12 @@ local function clearHighlight(obj)
     if obj:getSquare() == nil then
         return
     end
-    obj:setHighlighted(MOUSE_PLAYER, false, false)
-    obj:setOutlineHighlight(MOUSE_PLAYER, false)
-    obj:setOutlineHlAttached(MOUSE_PLAYER, false)
-    ISInventoryPage.OnObjectHighlighted(MOUSE_PLAYER, obj, false)
+    -- A filled highlight belongs to another system, normally the open inventory
+    -- pane or a context menu. Leave its outline alone; that owner will clear it.
+    if not obj:isHighlighted(MOUSE_PLAYER) then
+        obj:setOutlineHighlight(MOUSE_PLAYER, false)
+        obj:setOutlineHlAttached(MOUSE_PLAYER, false)
+    end
 end
 
 local function clearAllHighlights()
@@ -288,23 +299,38 @@ local function isEligible(obj, player)
     return contributesWorldMenu(obj, player)
 end
 
+---@param value number|nil
+---@return number
+local function highlightChannel(value)
+    if type(value) ~= "number" then
+        value = DEFAULT_HIGHLIGHT_CHANNEL
+    end
+    return math.max(0, math.min(255, value)) * COLOR_CHANNEL_SCALE
+end
+
+---@return number
+---@return number
+---@return number
+local function getHighlightColor()
+    local options = SandboxVars and SandboxVars.HoverHighlighting
+    if options == nil then
+        local channel = DEFAULT_HIGHLIGHT_CHANNEL * COLOR_CHANNEL_SCALE
+        return channel, channel, channel
+    end
+    return highlightChannel(options.HighlightRed),
+        highlightChannel(options.HighlightGreen),
+        highlightChannel(options.HighlightBlue)
+end
+
 ---@param obj IsoObject
 local function applyHighlight(obj)
-    if instanceof(obj, "IsoWorldInventoryObject") then
-        -- Ground items apply world-item color and outline inside setHighlighted.
-        obj:setHighlighted(MOUSE_PLAYER, true, false)
-    else
-        local color = getCore():getObjectHighlitedColor()
-        obj:setHighlightColor(MOUSE_PLAYER, color)
-        -- renderOnce=false keeps the glow until we clear it.
-        obj:setHighlighted(MOUSE_PLAYER, true, false)
-        if getCore():getOptionDoContainerOutline() then
-            obj:setOutlineHighlight(MOUSE_PLAYER, true)
-            obj:setOutlineHlAttached(MOUSE_PLAYER, true)
-            obj:setOutlineHighlightCol(MOUSE_PLAYER, color:getR(), color:getG(), color:getB(), 1)
-        end
-    end
-    ISInventoryPage.OnObjectHighlighted(MOUSE_PLAYER, obj, true)
+    local r, g, b = getHighlightColor()
+    -- The outline has its own engine state. Do not call setHighlighted here:
+    -- OpenAllContainers and vanilla inventory panes use that filled-highlight bit
+    -- to mean that a container is actually open/selected.
+    obj:setOutlineHighlight(MOUSE_PLAYER, true)
+    obj:setOutlineHlAttached(MOUSE_PLAYER, true)
+    obj:setOutlineHighlightCol(MOUSE_PLAYER, r, g, b, 1)
 end
 
 ---Sprite quad scale used when recording pick bounds.

@@ -2,7 +2,8 @@
 
 This is a small, client-side only mod for Project Zomboid. It highlights
 interactables when hovering the mouse over them using the game's 'container open'
-item highlight function.
+item highlight function. Instead of filling in the item with the color, it just outlines
+the item.
 
 
 ![](assets/20260916_211945_PZ_HoverHighlight4.png)
@@ -13,9 +14,7 @@ I made this mostly to learn how to mod Project Zomboid, but also because I would
 occasionally have issues trying to open the context menu with the mouse, especially 
 on sinks and windows.
 
-Currently uses the color defined for the game's container open highlight.
-Which you can set in the game options. This works for me, but if there is enough
-demand I can make it configurable.
+The highlight is configurable, it defaults to a pretty neutral gray color.
 
 ### Usage
 
@@ -41,8 +40,13 @@ context menu. Several other checks are necessary, for example, the walls
 that contain a window add window context options, so I check if the object
 has a window in it instead. This might lead to some strange behavior
 with player built objects, so let me know if you are or aren't seeing something
-highlighted that should or shouldn't.
+highlighted that should or shouldn't be.
 
 I did use AI when writing the code and learning Project Zomboid internals. But
 images, this readme, and anything I write intended directly for human consumption
 is written by me.
+
+### License
+
+Hover Highlighting is free software under the GNU General Public License,
+version 3 or later. See [LICENSE](LICENSE) for the full text.
