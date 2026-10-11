@@ -21,10 +21,11 @@
 -- Mouse input is always player 0 in vanilla click handling.
 local MOUSE_PLAYER = 0
 
--- Custom sandbox options support integers but not a color-picker type
--- (sandbox/CustomSandboxOptions.java:103-123). Values are stored as 0-255 RGB.
-local DEFAULT_HIGHLIGHT_CHANNEL = 175
-local COLOR_CHANNEL_SCALE = 1 / 255
+require "PZAPI/ModOptions"
+
+local DEFAULT_HIGHLIGHT_COLOR = 175 / 255
+---@type table|nil
+local colorOption = nil
 
 -- Height of one storey's wall in tiles of iso ground distance. A storey is
 -- 96 * tileScale screen px (iso/IsoUtils.java:105) and a tile of iso x or y moves
@@ -43,11 +44,28 @@ local GRAB_RADIUS_PX = 48
 -- hold hides that. Any real cursor movement clears immediately.
 local HOLD_MS = 100
 local HOLD_MOVE_PX = 2
+local OPAQUE_DOOR_ALPHA = 0.99
+
+-- 42.21 removed IsoGridSquare:getWindow/getWindowFrame/getDoor(boolean north);
+-- the replacements take GridSquareEdgeFacingDirection
+-- (docs/java-library/zombie/iso/IsoGridSquare.lua:809,1384,1400). Vanilla maps
+-- north=true to NORTH_SOUTH (shared/Moveables/ISMoveableSpriteProps.lua:2200).
+---@param north boolean
+---@return GridSquareEdgeFacingDirection
+local function edgeFacing(north)
+    if north then
+        return GridSquareEdgeFacingDirection.NORTH_SOUTH
+    end
+    return GridSquareEdgeFacingDirection.EAST_WEST
+end
 
 -- Java objects are stable table keys; vanilla keys ObjectsHighlightedElsewhere the same
 -- way (client/ISUI/ISInventoryPage.lua:434).
 ---@type table<IsoObject, boolean>
 local highlighted = {}
+---Interior doors whose filled fallback highlight is owned by this mod.
+---@type table<IsoObject, boolean>
+local filledDoorHighlights = {}
 ---Scratch set rebuilt every frame; emptied at the end of onRenderTick.
 ---@type table<IsoObject, boolean>
 local wanted = {}
@@ -60,11 +78,17 @@ local holdAnchorX, holdAnchorY = -1, -1
 ---@param obj IsoObject
 local function clearHighlight(obj)
     if obj:getSquare() == nil then
+        filledDoorHighlights[obj] = nil
         return
+    end
+    local ownsFilledHighlight = filledDoorHighlights[obj] == true
+    if ownsFilledHighlight then
+        obj:setHighlighted(MOUSE_PLAYER, false, false)
+        filledDoorHighlights[obj] = nil
     end
     -- A filled highlight belongs to another system, normally the open inventory
     -- pane or a context menu. Leave its outline alone; that owner will clear it.
-    if not obj:isHighlighted(MOUSE_PLAYER) then
+    if ownsFilledHighlight or not obj:isHighlighted(MOUSE_PLAYER) then
         obj:setOutlineHighlight(MOUSE_PLAYER, false)
         obj:setOutlineHlAttached(MOUSE_PLAYER, false)
     end
@@ -124,7 +148,8 @@ end
 ---`IsoObject:isWindow()` is only the WindowN/W *wall* flags (iso/IsoObject.java:7032),
 ---not the glass. South-facing room walls are WindowN/cutN on the square south of
 ---the room; ContextPick hits that wall for most of the sprite.
----See iso/IsoGridSquare.java:3778, iso/objects/IsoWindowFrame.java:138.
+---See docs/java-library/zombie/iso/IsoGridSquare.lua:1384,
+---docs/java-library/zombie/iso/objects/IsoWindowFrame.lua:59.
 ---@param obj IsoObject
 ---@return IsoWindow|nil
 local function windowPaneFor(obj)
@@ -144,7 +169,7 @@ local function windowPaneFor(obj)
         or obj:hasProperty(IsoFlagType.cutN)
         or obj:isWallN()
     then
-        local pane = square:getWindow(true)
+        local pane = square:getWindow(GridSquareEdgeFacingDirection.NORTH_SOUTH)
         if pane ~= nil then
             return pane
         end
@@ -153,7 +178,7 @@ local function windowPaneFor(obj)
         or obj:hasProperty(IsoFlagType.cutW)
         or obj:isWallW()
     then
-        return square:getWindow(false)
+        return square:getWindow(GridSquareEdgeFacingDirection.EAST_WEST)
     end
     return nil
 end
@@ -175,12 +200,19 @@ local function resolveTarget(obj)
     return obj
 end
 
+---@param obj IsoObject
+---@return boolean
+local function isDoorObject(obj)
+    return instanceof(obj, "IsoDoor")
+        or (instanceof(obj, "IsoThumpable") and obj:isDoor())
+end
+
 ---The glass, a door, a curtain, an empty opening, or a player-built door/window.
 ---Wall sprites around an IsoWindow stay structural even if they carry WindowN/W.
 ---@param obj IsoObject
 ---@return boolean
 local function isDoorOrWindow(obj)
-    if instanceof(obj, "IsoDoor")
+    if isDoorObject(obj)
         or instanceof(obj, "IsoWindow")
         or instanceof(obj, "IsoCurtain")
     then
@@ -299,38 +331,70 @@ local function isEligible(obj, player)
     return contributesWorldMenu(obj, player)
 end
 
----@param value number|nil
----@return number
-local function highlightChannel(value)
-    if type(value) ~= "number" then
-        value = DEFAULT_HIGHLIGHT_CHANNEL
-    end
-    return math.max(0, math.min(255, value)) * COLOR_CHANNEL_SCALE
-end
-
 ---@return number
 ---@return number
 ---@return number
 local function getHighlightColor()
-    local options = SandboxVars and SandboxVars.HoverHighlighting
-    if options == nil then
-        local channel = DEFAULT_HIGHLIGHT_CHANNEL * COLOR_CHANNEL_SCALE
-        return channel, channel, channel
+    local color = colorOption and colorOption:getValue()
+    if color == nil then
+        return DEFAULT_HIGHLIGHT_COLOR, DEFAULT_HIGHLIGHT_COLOR,
+            DEFAULT_HIGHLIGHT_COLOR
     end
-    return highlightChannel(options.HighlightRed),
-        highlightChannel(options.HighlightGreen),
-        highlightChannel(options.HighlightBlue)
+    return color.r, color.g, color.b
+end
+
+---Closed opaque doors between two distinct rooms hit a Build 42 outline-renderer
+---edge case. Exterior doors have a nil room on one side; open and cutaway doors
+---continue to use the normal outline path.
+---@param obj IsoObject
+---@return boolean
+local function needsFilledDoorHighlight(obj)
+    if not isDoorObject(obj) or obj:IsOpen()
+        or obj:getTargetAlpha(MOUSE_PLAYER) < OPAQUE_DOOR_ALPHA
+    then
+        return false
+    end
+    local square = obj:getSquare()
+    if square == nil then
+        return false
+    end
+    local opposite = square:getAdjacentSquare(
+        obj:getNorth() and IsoDirections.N or IsoDirections.W)
+    if opposite == nil then
+        return false
+    end
+    local room = square:getRoom()
+    local oppositeRoom = opposite:getRoom()
+    return room ~= nil and oppositeRoom ~= nil and room ~= oppositeRoom
+end
+
+---@param obj IsoObject
+local function updateFilledDoorHighlight(obj)
+    local ownsFilledHighlight = filledDoorHighlights[obj] == true
+    if ownsFilledHighlight and not obj:isHighlighted(MOUSE_PLAYER) then
+        filledDoorHighlights[obj] = nil
+        ownsFilledHighlight = false
+    end
+    if needsFilledDoorHighlight(obj) then
+        if not ownsFilledHighlight and not obj:isHighlighted(MOUSE_PLAYER) then
+            local r, g, b = getHighlightColor()
+            obj:setHighlightColor(MOUSE_PLAYER, r, g, b, 1)
+            obj:setHighlighted(MOUSE_PLAYER, true, false)
+            filledDoorHighlights[obj] = true
+        end
+    elseif ownsFilledHighlight then
+        obj:setHighlighted(MOUSE_PLAYER, false, false)
+        filledDoorHighlights[obj] = nil
+    end
 end
 
 ---@param obj IsoObject
 local function applyHighlight(obj)
     local r, g, b = getHighlightColor()
-    -- The outline has its own engine state. Do not call setHighlighted here:
-    -- OpenAllContainers and vanilla inventory panes use that filled-highlight bit
-    -- to mean that a container is actually open/selected.
     obj:setOutlineHighlight(MOUSE_PLAYER, true)
     obj:setOutlineHlAttached(MOUSE_PLAYER, true)
     obj:setOutlineHighlightCol(MOUSE_PLAYER, r, g, b, 1)
+    updateFilledDoorHighlight(obj)
 end
 
 ---Sprite quad scale used when recording pick bounds.
@@ -440,15 +504,30 @@ end
 ---@return boolean hasOpening true if the edge holds any opening, eligible or not
 local function addOpeningsOnEdge(square, north, player, out)
     local found = false
-    local window = square:getWindow(north)
+    local window = square:getWindow(edgeFacing(north))
     if window ~= nil then
         addOpening(window, player, out)
         found = true
     end
-    local frame = square:getWindowFrame(north)
+    local frame = square:getWindowFrame(edgeFacing(north))
     if frame ~= nil then
         addOpening(frame, player, out)
         found = true
+    end
+    -- A closed N/W door is rendered as the wall. When that wall is cut away,
+    -- performDrawWallSegmentSingle returns before renderWallTile
+    -- (iso/IsoGridSquare.java:2427-2433), so the
+    -- door never gets a click quad and getLastPicked cannot return it. An open
+    -- door is not a wall tile (calculateObjectTargetAlpha returns early,
+    -- iso/fboRenderChunk/FBORenderCell.java:2030-2032) and the sprite test hits it.
+    local door = square:getDoor(edgeFacing(north))
+    if instanceof(door, "IsoDoor") or instanceof(door, "IsoThumpable") then
+        ---@type IsoDoor|IsoThumpable
+        local opening = door
+        if not opening:IsOpen() then
+            addOpening(opening, player, out)
+            found = true
+        end
     end
     local objects = square:getObjects()
     for n = 0, objects:size() - 1 do
@@ -692,9 +771,48 @@ local function onRenderTick()
             applyHighlight(obj)
             highlighted[obj] = true
             lastWanted[obj] = now
+        else
+            updateFilledDoorHighlight(obj)
         end
         wanted[obj] = nil
     end
 end
+
+---@param color table
+local function applyColorToActiveHighlights(color)
+    for obj in pairs(highlighted) do
+        if obj:getSquare() ~= nil then
+            obj:setOutlineHighlightCol(MOUSE_PLAYER, color.r, color.g, color.b, 1)
+            if filledDoorHighlights[obj] then
+                obj:setHighlightColor(MOUSE_PLAYER, color.r, color.g, color.b, 1)
+            end
+        end
+    end
+end
+
+local modOptions = PZAPI.ModOptions
+local options = modOptions:getOptions("HoverHighlighting")
+if options == nil then
+    options = modOptions:create("HoverHighlighting", "IGUI_HoverHighlighting_Options")
+    colorOption = options:addColorPicker(
+        "highlightColor",
+        "IGUI_HoverHighlighting_HighlightColor",
+        DEFAULT_HIGHLIGHT_COLOR,
+        DEFAULT_HIGHLIGHT_COLOR,
+        DEFAULT_HIGHLIGHT_COLOR,
+        1,
+        "IGUI_HoverHighlighting_HighlightColor_tt"
+    )
+else
+    colorOption = options:getOption("highlightColor")
+end
+colorOption.onChangeApply = function(_, color)
+    applyColorToActiveHighlights(color)
+end
+
+-- The options screen also loads this file, but may not be opened before play.
+Events.OnGameBoot.Add(function()
+    modOptions:load()
+end)
 
 Events.OnRenderTick.Add(onRenderTick)

@@ -50,3 +50,7 @@ is written by me.
 
 Hover Highlighting is free software under the GNU General Public License,
 version 3 or later. See [LICENSE](LICENSE) for the full text.
+
+<!-- TASKPLANNER:ATTRIBUTION:START -->
+This project uses [TaskPlanner](https://github.com/smekai/taskplanner) for task planning.
+<!-- TASKPLANNER:ATTRIBUTION:END -->
