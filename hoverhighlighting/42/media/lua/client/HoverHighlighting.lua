@@ -24,8 +24,11 @@ local MOUSE_PLAYER = 0
 require "PZAPI/ModOptions"
 
 local DEFAULT_HIGHLIGHT_COLOR = 175 / 255
+local ACTIVATION_KEY_BINDING = "HoverHighlighting Activation"
 ---@type table|nil
 local colorOption = nil
+---@type table|nil
+local activationModeOption = nil
 
 -- Height of one storey's wall in tiles of iso ground distance. A storey is
 -- 96 * tileScale screen px (iso/IsoUtils.java:105) and a tile of iso x or y moves
@@ -308,7 +311,6 @@ local function contributesWorldMenu(obj, player)
         or instanceof(obj, "IsoMannequin")
         or instanceof(obj, "IsoTrap")
         or instanceof(obj, "IsoBrokenGlass")
-        or instanceof(obj, "IsoTree")
         or instanceof(obj, "IsoDeadBody")
         or instanceof(obj, "IsoButcherHook")
         or instanceof(obj, "IsoFeedingTrough")
@@ -701,13 +703,13 @@ local function pickIsVisible(obj, square)
         or instanceof(obj, "IsoWindow")
         or instanceof(obj, "IsoDoor")
         or instanceof(obj, "IsoThumpable")
-        or instanceof(obj, "IsoTree")
 end
 
 ---Fill `out` with every object the hover should light this frame.
 ---@param player IsoPlayer
+---@param playerZ integer
 ---@param out table<IsoObject, boolean>
-local function collectHoverObjects(player, out)
+local function collectHoverObjects(player, playerZ, out)
     -- ClickObject is not exposed to Lua (docs/java-library/zombie/iso/__package.lua),
     -- so ContextPick(...).tile throws. UIManager.getLastPicked() is the IsoObject the
     -- engine already resolved from that pick (ui/UIManager.java:1543-1560).
@@ -719,14 +721,13 @@ local function collectHoverObjects(player, out)
     -- (iso/objects/IsoDoor.java:1200, iso/fboRenderChunk/FBORenderCell.java:1797).
     -- Bailing on a nil pick made every highlight blink at the thump rhythm.
     local picked = UIManager.getLastPicked()
-    local z = math.floor(player:getZ())
     ---@type IsoGridSquare|nil
     local pickSquare = nil
     if picked ~= nil then
         local obj = resolveTarget(picked)
-        pickSquare = obj:getSquare()
-        if pickSquare ~= nil then
-            z = pickSquare:getZ()
+        local square = obj:getSquare()
+        if square ~= nil and square:getZ() == playerZ then
+            pickSquare = square
             if pickIsVisible(obj, pickSquare) and isEligible(obj, player) then
                 out[obj] = true
             end
@@ -734,10 +735,16 @@ local function collectHoverObjects(player, out)
     end
     -- The menu runs its search for any picked object with a square
     -- (server/ISObjectClickHandler.lua:33), so this runs even when the pick is a floor.
-    collectAroundCursor(player, z, pickSquare, out)
+    collectAroundCursor(player, playerZ, pickSquare, out)
 end
 
 local function onRenderTick()
+    if activationModeOption ~= nil and activationModeOption:getValue()
+        and not isKeyDown(ACTIVATION_KEY_BINDING)
+    then
+        clearAllHighlights()
+        return
+    end
     local player = getSpecificPlayer(MOUSE_PLAYER)
     if player == nil or not playerCanHover(player) or isMouseOverUI() then
         clearAllHighlights()
@@ -752,13 +759,18 @@ local function onRenderTick()
         holdAnchorX = mx
         holdAnchorY = my
     end
-    collectHoverObjects(player, wanted)
+    local playerZ = math.floor(player:getZ())
+    collectHoverObjects(player, playerZ, wanted)
     -- Lua 5.1 allows clearing the current key during pairs(); adding keys does not.
     for obj in pairs(highlighted) do
-        if wanted[obj] then
+        local square = obj:getSquare()
+        if square == nil or square:getZ() ~= playerZ then
+            clearHighlight(obj)
+            highlighted[obj] = nil
+            lastWanted[obj] = nil
+        elseif wanted[obj] then
             lastWanted[obj] = now
         elseif moved
-            or obj:getSquare() == nil
             or now - (lastWanted[obj] or 0) > HOLD_MS
         then
             clearHighlight(obj)
@@ -803,8 +815,14 @@ if options == nil then
         1,
         "IGUI_HoverHighlighting_HighlightColor_tt"
     )
+    activationModeOption = options:addTickBox(
+        "requireKeyPress",
+        "IGUI_HoverHighlighting_RequireKeyPress",
+        false
+    )
 else
     colorOption = options:getOption("highlightColor")
+    activationModeOption = options:getOption("requireKeyPress")
 end
 colorOption.onChangeApply = function(_, color)
     applyColorToActiveHighlights(color)
@@ -813,6 +831,11 @@ end
 -- The options screen also loads this file, but may not be opened before play.
 Events.OnGameBoot.Add(function()
     modOptions:load()
+    table.insert(keyBinding, { value = "[Hover Highlighting]" })
+    table.insert(keyBinding, {
+        value = ACTIVATION_KEY_BINDING,
+        key = Keyboard.KEY_TAB,
+    })
 end)
 
 Events.OnRenderTick.Add(onRenderTick)
